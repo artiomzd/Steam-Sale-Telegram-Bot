@@ -165,7 +165,7 @@ source venv/bin/activate
 #### Запускаем бота:
 
 ```bash
-python main.py
+python3 main.py
 ```
 
 Вы увидите что-то вроде:
