@@ -121,7 +121,7 @@ pip install -r requirements.txt
 Создаём `.env` из шаблона:
 
 ```bash
-cp .env.example .env
+cp env.example .env
 nano .env
 ```
 
