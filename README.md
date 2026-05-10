@@ -75,8 +75,8 @@ sudo apt install -y screen
 Клонируем репозиторий (или загружаем файлы вручную через `scp` / FTP):
 
 ```bash
-git clone https://github.com/ВАШ_ЮЗЕРНЕЙМ/steam-sale-bot.git
-cd steam-sale-bot
+git clone https://github.com/artiomzd/Steam-Sale-Telegram-Bot
+cd Steam-Sale-Telegram-Bot
 ```
 
 ---
