@@ -36,14 +36,15 @@ from steam_api import (
 from checker import check_all_discounts
 
 logger = logging.getLogger(__name__)
+
 router = Router()
 
+# ============================================================
+# FSM States — состояния машины состояний
+# ============================================================
 
-# ============================================================
-# FSM States — состояния машины состояний (для /start онбординга)
-# ============================================================
 class OnboardingState(StatesGroup):
-    choosing_currency = State()  # пользователь выбирает валюту
+    choosing_currency = State()  # используется и при онбординге, и при /currency
 
 
 # ============================================================
@@ -83,6 +84,7 @@ def make_currency_keyboard() -> InlineKeyboardMarkup:
 # ============================================================
 # /start — Приветствие и выбор валюты
 # ============================================================
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     """
@@ -92,7 +94,6 @@ async def cmd_start(message: Message, state: FSMContext):
     """
     user_id = message.from_user.id
 
-    # Проверяем доступ (белый список)
     if not is_allowed(user_id):
         await message.answer("⛔ У вас нет доступа к этому боту.")
         return
@@ -121,29 +122,73 @@ async def cmd_start(message: Message, state: FSMContext):
 
 
 # ============================================================
-# Обработчик выбора валюты (inline кнопка)
+# /currency — Смена валюты в любой момент
 # ============================================================
+
+@router.message(Command("currency"))
+async def cmd_currency(message: Message, state: FSMContext):
+    """
+    Позволяет сменить валюту в любое время, не только при регистрации.
+    Показывает те же кнопки что и при онбординге.
+    """
+    user_id = message.from_user.id
+
+    if not is_allowed(user_id):
+        await message.answer("⛔ У вас нет доступа к этому боту.")
+        return
+
+    user = await get_user(user_id)
+    if user is None:
+        await message.answer("Сначала выполни /start для регистрации.")
+        return
+
+    _, symbol, _ = CURRENCIES.get(user["currency"], CURRENCIES["KZT"])
+    await state.set_state(OnboardingState.choosing_currency)
+    await message.answer(
+        f"💱 Текущая валюта: <b>{user['currency']} {symbol}</b>\n\n"
+        "Выберите новую валюту:",
+        parse_mode="HTML",
+        reply_markup=make_currency_keyboard(),
+    )
+
+
+# ============================================================
+# Обработчик выбора валюты (inline кнопка)
+# Работает и при онбординге (/start), и при смене (/currency)
+# ============================================================
+
 @router.callback_query(F.data.startswith("currency:"), OnboardingState.choosing_currency)
 async def callback_currency_select(callback: CallbackQuery, state: FSMContext):
     """
-    Срабатывает когда пользователь нажимает кнопку выбора валюты при онбординге.
-    Создаёт запись пользователя в БД с выбранной валютой.
+    Срабатывает когда пользователь нажимает кнопку выбора валюты.
+    Если пользователь новый — создаёт запись в БД.
+    Если уже зарегистрирован — обновляет валюту.
     """
-    user_id  = callback.from_user.id
+    user_id = callback.from_user.id
     currency = callback.data.split(":")[1]  # извлекаем код валюты из callback_data
-
-    # Создаём запись в БД
-    await create_user(user_id, currency)
-
     _, symbol, _ = CURRENCIES.get(currency, CURRENCIES["KZT"])
 
-    await callback.message.edit_text(
-        f"✅ Отлично! Валюта установлена: <b>{currency} {symbol}</b>\n\n"
-        f"Глобальный порог скидки по умолчанию: <b>{DEFAULT_THRESHOLD}%</b>\n"
-        f"Изменить можно командой /threshold [число]\n\n"
-        f"Используй /help для списка всех команд.",
-        parse_mode="HTML",
-    )
+    user = await get_user(user_id)
+
+    if user is None:
+        # Новый пользователь — создаём запись
+        await create_user(user_id, currency)
+        await callback.message.edit_text(
+            f"✅ Отлично! Валюта установлена: <b>{currency} {symbol}</b>\n\n"
+            f"Глобальный порог скидки по умолчанию: <b>{DEFAULT_THRESHOLD}%</b>\n"
+            f"Изменить можно командой /threshold [число]\n\n"
+            f"Используй /help для списка всех команд.",
+            parse_mode="HTML",
+        )
+    else:
+        # Уже зарегистрирован — обновляем валюту
+        await set_user_currency(user_id, currency)
+        await callback.message.edit_text(
+            f"✅ Валюта изменена на: <b>{currency} {symbol}</b>\n\n"
+            "Цены во всех командах теперь будут отображаться в этой валюте.",
+            parse_mode="HTML",
+        )
+
     await state.clear()
     await callback.answer()
 
@@ -151,6 +196,7 @@ async def callback_currency_select(callback: CallbackQuery, state: FSMContext):
 # ============================================================
 # /help — Список команд (динамический для админа)
 # ============================================================
+
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """
@@ -163,21 +209,20 @@ async def cmd_help(message: Message):
         await message.answer("⛔ У вас нет доступа к этому боту.")
         return
 
-    # Базовые команды для всех пользователей
     text = (
         "📖 <b>Список команд Steam Sale Bot</b>\n\n"
-        "/start — Начать работу / сменить валюту\n"
+        "/start — Начать работу\n"
+        "/currency — Сменить валюту отображения цен\n"
         "/search [название] — Найти игру в Steam\n"
         "/addappid [AppID] [порог%] — Добавить игру в отслеживание\n"
-        "    Пример: <code>/addappid 730 50</code>\n"
+        " Пример: <code>/addappid 730 50</code>\n"
         "/deleteappid [AppID] — Удалить игру из отслеживания\n"
         "/threshold [число] — Установить порог скидки (по умолчанию 75%)\n"
-        "    Пример: <code>/threshold 60</code>\n"
+        " Пример: <code>/threshold 60</code>\n"
         "/listappid — Список всех отслеживаемых игр\n"
         "/help — Эта справка\n"
     )
 
-    # Дополнительный блок только для администратора
     if is_admin(user_id):
         text += (
             "\n🔐 <b>Команды администратора:</b>\n"
@@ -191,6 +236,7 @@ async def cmd_help(message: Message):
 # ============================================================
 # /search — Поиск игры по названию
 # ============================================================
+
 @router.message(Command("search"))
 async def cmd_search(message: Message):
     """
@@ -204,7 +250,6 @@ async def cmd_search(message: Message):
         await message.answer("⛔ У вас нет доступа к этому боту.")
         return
 
-    # Извлекаем поисковый запрос (всё после команды)
     args = message.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         await message.answer(
@@ -216,12 +261,10 @@ async def cmd_search(message: Message):
 
     query = args[1].strip()
 
-    # Получаем настройки пользователя для конвертации валюты
     user = await get_user(user_id)
     currency = user["currency"] if user else "KZT"
 
     await message.answer(f"🔍 Ищу: <b>{query}</b>...", parse_mode="HTML")
-
     results = await search_games(query)
 
     if not results:
@@ -231,19 +274,15 @@ async def cmd_search(message: Message):
         )
         return
 
-    # Формируем ответ — максимум 5 результатов чтобы не спамить
     lines = [f"🎮 <b>Результаты поиска «{query}»:</b>\n"]
-
     for i, game in enumerate(results[:5], start=1):
-        appid    = game["appid"]
-        name     = game["name"]
+        appid = game["appid"]
+        name = game["name"]
         discount = game["discount_pct"]
-        price    = convert_price(game["price_cents"], currency)
-        url      = get_steam_url(appid)
+        price = convert_price(game["price_cents"], currency)
+        url = get_steam_url(appid)
 
-        # Если есть скидка — показываем
         discount_str = f" 🔥 -{discount}%" if discount > 0 else ""
-
         lines.append(
             f"{i}. <b>{name}</b>\n"
             f"   AppID: <code>{appid}</code> | Цена: {price}{discount_str}\n"
@@ -251,20 +290,19 @@ async def cmd_search(message: Message):
         )
 
     lines.append("➕ Чтобы добавить в отслеживание: <code>/addappid [AppID]</code>")
-
     await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ============================================================
 # /addappid — Добавление игры в отслеживание
 # ============================================================
+
 @router.message(Command("addappid"))
 async def cmd_addappid(message: Message):
     """
     Добавляет игру по AppID в список отслеживания пользователя.
-    Опционально можно указать индивидуальный порог скидки.
-    Использование: /addappid 730         (использует глобальный порог)
-                   /addappid 730 50      (порог 50% для этой игры)
+    Использование: /addappid 730        (глобальный порог)
+                   /addappid 730 50     (порог 50% для этой игры)
     """
     user_id = message.from_user.id
 
@@ -272,15 +310,12 @@ async def cmd_addappid(message: Message):
         await message.answer("⛔ У вас нет доступа к этому боту.")
         return
 
-    # Убеждаемся что пользователь зарегистрирован
     user = await get_user(user_id)
     if user is None:
         await message.answer("Сначала выполни /start для регистрации.")
         return
 
     args = message.text.split()
-
-    # Валидация аргументов
     if len(args) < 2:
         await message.answer(
             "❌ Укажите AppID игры.\n"
@@ -289,14 +324,12 @@ async def cmd_addappid(message: Message):
         )
         return
 
-    # Парсим AppID
     try:
         appid = int(args[1])
     except ValueError:
         await message.answer("❌ AppID должен быть числом. Например: <code>/addappid 730</code>", parse_mode="HTML")
         return
 
-    # Парсим опциональный порог
     threshold = None
     if len(args) >= 3:
         try:
@@ -307,10 +340,9 @@ async def cmd_addappid(message: Message):
             await message.answer("❌ Порог скидки должен быть числом от 1 до 100.")
             return
 
-    # Проверяем что игра существует в Steam
     await message.answer(f"⏳ Проверяю AppID <code>{appid}</code>...", parse_mode="HTML")
-
     details = await get_game_details(appid)
+
     if details is None:
         await message.answer(
             f"❌ Игра с AppID <code>{appid}</code> не найдена в Steam.\n"
@@ -319,10 +351,8 @@ async def cmd_addappid(message: Message):
         )
         return
 
-    # Добавляем в БД
     await add_tracked_game(user_id, appid, threshold)
 
-    # Формируем подтверждение
     effective_threshold = threshold if threshold is not None else user["threshold"]
     currency = user["currency"]
     price_str = convert_price(details["price_final"], currency)
@@ -342,6 +372,7 @@ async def cmd_addappid(message: Message):
 # ============================================================
 # /deleteappid — Удаление игры из отслеживания
 # ============================================================
+
 @router.message(Command("deleteappid"))
 async def cmd_deleteappid(message: Message):
     """
@@ -355,7 +386,6 @@ async def cmd_deleteappid(message: Message):
         return
 
     args = message.text.split()
-
     if len(args) < 2:
         await message.answer(
             "❌ Укажите AppID игры.\n"
@@ -387,11 +417,11 @@ async def cmd_deleteappid(message: Message):
 # ============================================================
 # /threshold — Установка глобального порога скидки
 # ============================================================
+
 @router.message(Command("threshold"))
 async def cmd_threshold(message: Message):
     """
     Устанавливает глобальный порог скидки пользователя.
-    Этот порог используется для всех игр без индивидуального порога.
     Использование: /threshold 60
     """
     user_id = message.from_user.id
@@ -406,7 +436,6 @@ async def cmd_threshold(message: Message):
         return
 
     args = message.text.split()
-
     if len(args) < 2:
         await message.answer(
             f"📊 Текущий порог скидки: <b>{user['threshold']}%</b>\n\n"
@@ -425,7 +454,6 @@ async def cmd_threshold(message: Message):
         return
 
     await set_user_threshold(user_id, new_threshold)
-
     await message.answer(
         f"✅ Глобальный порог скидки установлен: <b>{new_threshold}%</b>\n\n"
         f"Теперь вы будете получать уведомления когда скидка ≥ {new_threshold}%.",
@@ -436,11 +464,11 @@ async def cmd_threshold(message: Message):
 # ============================================================
 # /listappid — Список всех отслеживаемых игр
 # ============================================================
+
 @router.message(Command("listappid"))
 async def cmd_listappid(message: Message):
     """
     Показывает все игры в списке отслеживания пользователя.
-    Для каждой игры: название, текущая цена, скидка, пороги, ссылки.
     Делает запросы к Steam API для актуальных данных.
     """
     user_id = message.from_user.id
@@ -455,7 +483,6 @@ async def cmd_listappid(message: Message):
         return
 
     games = await get_user_games(user_id)
-
     if not games:
         await message.answer(
             "📋 Ваш список отслеживания пуст.\n"
@@ -469,27 +496,21 @@ async def cmd_listappid(message: Message):
     await message.answer(f"⏳ Загружаю данные для {len(games)} игр...")
 
     lines = [f"📋 <b>Ваши отслеживаемые игры</b> (валюта: {currency}):\n"]
-
     for i, game_row in enumerate(games, start=1):
-        appid          = game_row["appid"]
+        appid = game_row["appid"]
         game_threshold = game_row["threshold"] if game_row["threshold"] is not None else global_threshold
 
-        # Запрашиваем актуальные данные из Steam
         details = await get_game_details(appid)
-
         if details is None:
-            # Игра могла быть удалена из Steam
             lines.append(
                 f"{i}. AppID <code>{appid}</code> — ⚠️ данные недоступны\n"
                 f"   Порог: {game_threshold}%\n"
             )
             continue
 
-        name     = details["name"]
+        name = details["name"]
         discount = details["discount_pct"]
-        price    = convert_price(details["price_final"], currency)
-
-        # Показываем иконку огня если сейчас есть скидка
+        price = convert_price(details["price_final"], currency)
         discount_str = f"🔥 -{discount}%" if discount > 0 else "без скидки"
 
         lines.append(
@@ -501,25 +522,20 @@ async def cmd_listappid(message: Message):
         )
 
     lines.append(f"\n💡 Глобальный порог: <b>{global_threshold}%</b> | Изменить: /threshold")
-
     await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ============================================================
 # /debug_force — Принудительная проверка (только для админа)
 # ============================================================
+
 @router.message(Command("debug_force"))
 async def cmd_debug_force(message: Message, bot: Bot):
-    """
-    Запускает полную проверку скидок прямо сейчас, не дожидаясь планировщика.
-    Доступно только администратору.
-    """
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Эта команда доступна только администратору.")
         return
 
     await message.answer("🔄 Запускаю принудительную проверку скидок...")
-
     try:
         await check_all_discounts(bot)
         await message.answer("✅ Проверка завершена! Уведомления отправлены (если были скидки).")
@@ -531,18 +547,14 @@ async def cmd_debug_force(message: Message, bot: Bot):
 # ============================================================
 # /stats — Статистика бота (только для админа)
 # ============================================================
+
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
-    """
-    Показывает общую статистику бота.
-    Доступно только администратору.
-    """
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Эта команда доступна только администратору.")
         return
 
     users_count, games_count = await get_stats()
-
     await message.answer(
         f"📊 <b>Статистика Steam Sale Bot</b>\n\n"
         f"👥 Пользователей: <b>{users_count}</b>\n"
