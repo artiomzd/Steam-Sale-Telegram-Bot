@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # ============================================================
 # main.py — Точка входа. Запуск бота и планировщика
 # ============================================================
@@ -17,8 +18,6 @@ from handlers import router
 from checker import check_all_discounts
 
 # --- Настройка логирования ---
-# Выводим в консоль с уровнем INFO
-# Для отладки можно поменять на logging.DEBUG
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -30,6 +29,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # Главная async-функция запуска
 # ============================================================
+
 async def main():
     # 1. Инициализируем базу данных (создаём таблицы если не существуют)
     logger.info("Инициализация базы данных...")
@@ -41,7 +41,7 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # 3. Диспетчер с хранилищем состояний в памяти (FSM для онбординга)
+    # 3. Диспетчер с хранилищем состояний в памяти (FSM)
     dp = Dispatcher(storage=MemoryStorage())
 
     # 4. Подключаем роутер с обработчиками команд
@@ -49,9 +49,6 @@ async def main():
 
     # 5. Настраиваем планировщик задач
     scheduler = AsyncIOScheduler(timezone="UTC")
-
-    # Задача: проверять скидки каждые CHECK_INTERVAL_HOURS часов
-    # bot передаём через аргумент kwargs
     scheduler.add_job(
         check_all_discounts,
         trigger="interval",
@@ -60,11 +57,8 @@ async def main():
         id="discount_check",
         replace_existing=True,
     )
-
     scheduler.start()
-    logger.info(
-        f"✅ Планировщик запущен. Проверка каждые {CHECK_INTERVAL_HOURS} ч."
-    )
+    logger.info(f"✅ Планировщик запущен. Проверка каждые {CHECK_INTERVAL_HOURS} ч.")
 
     # 6. Уведомляем администратора что бот стартовал
     try:
@@ -78,12 +72,11 @@ async def main():
     except Exception as e:
         logger.warning(f"Не удалось отправить стартовое сообщение админу: {e}")
 
-    # 7. Запускаем polling (бот начинает слушать обновления от Telegram)
+    # 7. Запускаем polling
     logger.info("🚀 Бот запущен, ожидаю команды...")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        # При остановке — корректно закрываем сессию
         scheduler.shutdown()
         await bot.session.close()
         logger.info("Бот остановлен.")
@@ -92,6 +85,7 @@ async def main():
 # ============================================================
 # Точка входа
 # ============================================================
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
